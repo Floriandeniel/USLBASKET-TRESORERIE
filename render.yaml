@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: usl-tresorerie
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node server/index.js
+    autoDeploy: true
+    disk:
+      name: usl-tresorerie-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATA_DIR
+        value: /data
+      - key: NODE_ENV
+        value: production
