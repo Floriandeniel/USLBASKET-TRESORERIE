@@ -8,7 +8,9 @@ var MONTH_LABELS=["Juillet","Août","Septembre","Octobre","Novembre","Décembre"
 var state=null;
 var currentUser=null;
 var authView={mode:"loading",error:""};
+var globalSections=null; /* liste des sections (null = pas encore chargée), utilisée par l'administrateur général */
 var ui={tab:"dashboard",
+  activeSection:null,
   filters:{q:"",type:"",compte:"",cat:"",validOnly:"",from:"",to:""},
   sort:{key:"dateOp",dir:"desc"},
   modal:null,editing:null,confirm:null,users:null};
@@ -79,6 +81,15 @@ function seasonMonthIndex(dateStr){
 }
 
 /* ================= API / PERSISTENCE ================= */
+function sectionQS(){
+  /* L'administrateur général (super_admin) navigue entre plusieurs sections : on précise
+     la section active dans l'URL. Pour un compte de section (admin/membre), le serveur
+     déduit toujours la section depuis la session — inutile et non autorisé de la préciser. */
+  if(currentUser&&currentUser.role==="super_admin"&&ui.activeSection){
+    return "?section="+ui.activeSection;
+  }
+  return "";
+}
 function api(path,opts){
   opts=opts||{};
   var headers=Object.assign({"Content-Type":"application/json"},opts.headers||{});
@@ -115,7 +126,7 @@ function currentConfig(){
   return {meta:state.meta,accounts:state.accounts,categories:state.categories,budget:state.budget,refs:state.refs,anomalySettings:state.anomalySettings};
 }
 function saveConfig(successMsg){
-  return api("/api/config",{method:"PUT",body:JSON.stringify(currentConfig())}).then(function(){
+  return api("/api/config"+sectionQS(),{method:"PUT",body:JSON.stringify(currentConfig())}).then(function(){
     if(successMsg) toast(successMsg);
     render();
   }).catch(function(e){
@@ -130,7 +141,7 @@ function boot(){
   api("/api/me").then(function(me){
     if(me.authenticated){
       currentUser=me.user;
-      loadAppData();
+      afterLogin();
     } else {
       authView={mode:me.needsSetup?"setup":"login",error:""};
       renderAuthScreen();
@@ -140,14 +151,44 @@ function boot(){
     renderAuthScreen();
   });
 }
+function afterLogin(){
+  if(currentUser.role==="super_admin"){
+    ui.activeSection=null; ui.tab="vue-globale"; state=null;
+    render();
+    refreshGlobalSections();
+  } else {
+    ui.activeSection=currentUser.sectionId;
+    loadAppData();
+  }
+}
 function loadAppData(){
-  Promise.all([api("/api/config"),api("/api/transactions")]).then(function(results){
+  Promise.all([api("/api/config"+sectionQS()),api("/api/transactions"+sectionQS())]).then(function(results){
     state=results[0];
     state.transactions=results[1];
     render();
   }).catch(function(e){
     toast("Erreur de chargement : "+e.message,true);
   });
+}
+function refreshGlobalSections(){
+  api("/api/sections").then(function(list){
+    globalSections=list;
+    if(ui.tab==="vue-globale"||ui.tab==="sections") render();
+  }).catch(function(e){ toast("Erreur : "+e.message,true); });
+}
+function switchToSection(id){
+  ui.activeSection=id;
+  state=null;
+  ui.tab="dashboard";
+  render();
+  loadAppData();
+}
+function switchToGlobal(){
+  ui.activeSection=null;
+  state=null;
+  ui.tab="vue-globale";
+  render();
+  refreshGlobalSections();
 }
 function renderAuthScreen(){
   var root=document.getElementById("root");
@@ -159,7 +200,7 @@ function renderAuthScreen(){
   var isSetup=authView.mode==="setup";
   root.innerHTML="<div class=\"authwrap\"><div class=\"authcard\">"+
     "<div class=\"brand-name\">🏀 USL Trésorerie</div>"+
-    "<div class=\"brand-sub\">"+(isSetup?"Créer le compte administrateur du club":"Connexion au club")+"</div>"+
+    "<div class=\"brand-sub\">"+(isSetup?"Créer le compte administrateur général de l'association":"Connexion à l'association")+"</div>"+
     (authView.error?"<div class=\"err\">"+escHtml(authView.error)+"</div>":"")+
     "<form id=\"auth-form\">"+
       (isSetup?"<div class=\"field\"><label>Nom affiché</label><input type=\"text\" id=\"auth-display\" required></div>":"")+
@@ -167,7 +208,7 @@ function renderAuthScreen(){
       "<div class=\"field\"><label>Mot de passe"+(isSetup?" (6 caractères minimum)":"")+"</label><input type=\"password\" id=\"auth-password\" required autocomplete=\""+(isSetup?"new-password":"current-password")+"\"></div>"+
       "<button class=\"btn btn-primary\" type=\"submit\">"+(isSetup?"Créer le compte":"Se connecter")+"</button>"+
     "</form>"+
-    (isSetup?"":"<div class=\"switch\">Premier accès au club ? Le premier compte créé devient administrateur.</div>")+
+    (isSetup?"":"<div class=\"switch\">Premier accès à l'application ? Le premier compte créé devient administrateur général.</div>")+
     "</div></div>";
   var form=document.getElementById("auth-form");
   form.addEventListener("submit",function(e){
@@ -180,7 +221,7 @@ function renderAuthScreen(){
     api(path,{method:"POST",body:JSON.stringify(payload)}).then(function(data){
       currentUser=data.user;
       authView={mode:"login",error:""};
-      loadAppData();
+      afterLogin();
     }).catch(function(err){
       authView.error=err.message||"Erreur";
       renderAuthScreen();
@@ -189,44 +230,77 @@ function renderAuthScreen(){
 }
 
 /* ================= RENDER ROOT / NAV ================= */
-var NAV=[
+var DATA_NAV=[
   {group:"Vue d'ensemble",items:[{id:"dashboard",label:"Tableau de bord",ic:"◈"}]},
   {group:"Saisie",items:[{id:"mouvements",label:"Mouvements",ic:"☷"}]},
   {group:"Structure",items:[{id:"comptes",label:"Comptes",ic:"▤"},{id:"categories",label:"Catégories",ic:"≡"},{id:"referentiels",label:"Référentiels",ic:"⚙"}]},
   {group:"Budget",items:[{id:"budget",label:"Budget prévisionnel",ic:"▣"},{id:"resultat",label:"Réalisé vs prévisionnel",ic:"⚖"}]},
   {group:"Analyses",items:[{id:"mensuelle",label:"Analyse mensuelle",ic:"▦"},{id:"depenses-recettes",label:"Dépenses / recettes",ic:"▥"}]},
-  {group:"Contrôle",items:[{id:"bilan",label:"Bilan / trésorerie",ic:"◉"},{id:"anomalies",label:"Anomalies",ic:"⚠"}]},
-  {group:"Administration",items:[{id:"users",label:"Utilisateurs",ic:"◍",adminOnly:true}]}
+  {group:"Contrôle",items:[{id:"bilan",label:"Bilan / trésorerie",ic:"◉"},{id:"anomalies",label:"Anomalies",ic:"⚠"}]}
 ];
-var TAB_TITLES={dashboard:"Tableau de bord",mouvements:"Mouvements",comptes:"Comptes",categories:"Catégories",referentiels:"Référentiels",budget:"Budget prévisionnel",resultat:"Réalisé vs prévisionnel",mensuelle:"Analyse mensuelle",'depenses-recettes':"Analyse dépenses / recettes",bilan:"Bilan et trésorerie",anomalies:"Détection d'anomalies",users:"Utilisateurs"};
+var TAB_TITLES={dashboard:"Tableau de bord",mouvements:"Mouvements",comptes:"Comptes",categories:"Catégories",referentiels:"Référentiels",budget:"Budget prévisionnel",resultat:"Réalisé vs prévisionnel",mensuelle:"Analyse mensuelle",'depenses-recettes':"Analyse dépenses / recettes",bilan:"Bilan et trésorerie",anomalies:"Détection d'anomalies",users:"Utilisateurs",'vue-globale':"Vue globale de l'association",sections:"Sections"};
+
+function buildNav(isSuper,isAdmin,hasSection){
+  var groups=[];
+  if(isSuper) groups.push({group:"Association",items:[{id:"vue-globale",label:"Vue globale",ic:"🌐"}]});
+  if(hasSection) DATA_NAV.forEach(function(g){ groups.push(g); });
+  var adminItems=[];
+  if(isAdmin) adminItems.push({id:"users",label:"Utilisateurs",ic:"◍"});
+  if(isSuper) adminItems.push({id:"sections",label:"Sections",ic:"▧"});
+  if(adminItems.length) groups.push({group:"Administration",items:adminItems});
+  return groups;
+}
 
 function render(){
-  if(!state){ renderAuthScreen(); return; }
+  if(!currentUser){ renderAuthScreen(); return; }
   var root=document.getElementById("root");
-  var isAdmin=currentUser&&currentUser.role==="admin";
-  var navHtml=NAV.map(function(g){
-    var items=g.items.filter(function(it){ return !it.adminOnly||isAdmin; });
-    if(!items.length) return "";
+  var isSuper=currentUser.role==="super_admin";
+  var isAdmin=isSuper||currentUser.role==="admin";
+  var hasSection=!!ui.activeSection;
+
+  if(hasSection&&!state){
+    root.innerHTML="<div class=\"loadingscreen\">Chargement…</div>";
+    return;
+  }
+  if(!hasSection&&isSuper&&["vue-globale","sections","users"].indexOf(ui.tab)===-1){
+    ui.tab="vue-globale";
+  }
+
+  var navGroups=buildNav(isSuper,isAdmin,hasSection);
+  var navHtml=navGroups.map(function(g){
     return "<div class=\"nav-group\"><div class=\"nav-group-label\">"+escHtml(g.group)+"</div>"+
-      items.map(function(it){
+      g.items.map(function(it){
         return "<button class=\"nav-btn"+(ui.tab===it.id?" active":"")+"\" data-nav=\""+it.id+"\"><span class=\"nav-ic\">"+it.ic+"</span>"+escHtml(it.label)+"</button>";
       }).join("")+"</div>";
   }).join("");
 
+  var brandName=hasSection?state.meta.club:"USL Trésorerie";
+  var brandSub=hasSection?("Saison "+state.meta.saison):"Vue de l'association";
+
+  var sectionSwitcherHtml="";
+  if(isSuper){
+    var opts="<option value=\"\""+(hasSection?"":" selected")+">— Vue globale —</option>"+
+      (globalSections||[]).map(function(s){return "<option value=\""+s.id+"\""+(String(ui.activeSection)===String(s.id)?" selected":"")+">"+escHtml(s.name)+"</option>";}).join("");
+    sectionSwitcherHtml="<div class=\"section-switcher\"><label>Section active</label><select id=\"section-switch\">"+opts+"</select></div>";
+  }
+
+  var roleLabel=isSuper?"Admin général":(isAdmin?"Admin":"Membre");
+
   root.innerHTML=
     "<div id=\"appwrap\">"+
       "<nav class=\"sidebar\">"+
-        "<div class=\"brand\"><div class=\"brand-name\">🏀 "+escHtml(state.meta.club)+"</div><div class=\"brand-sub\">Saison "+escHtml(state.meta.saison)+"</div></div>"+
+        "<div class=\"brand\"><div class=\"brand-name\">🏀 "+escHtml(brandName)+"</div><div class=\"brand-sub\">"+escHtml(brandSub)+"</div></div>"+
+        sectionSwitcherHtml+
         navHtml+
         "<div class=\"sidebar-foot\">"+
-          "<div class=\"whoami\">👤 <b>"+escHtml(currentUser?currentUser.displayName:"")+"</b> <span class=\"roleflag"+(isAdmin?"":" member")+"\">"+(isAdmin?"Admin":"Membre")+"</span></div>"+
-          "<button class=\"btn btn-ghost btn-sm\" data-action=\"open-settings\">⚙︎ Paramètres du club</button>"+
+          "<div class=\"whoami\">👤 <b>"+escHtml(currentUser.displayName)+"</b> <span class=\"roleflag"+(isAdmin?"":" member")+"\">"+roleLabel+"</span></div>"+
+          (hasSection?"<button class=\"btn btn-ghost btn-sm\" data-action=\"open-settings\">⚙︎ Paramètres de la section</button>":"")+
           "<button class=\"btn btn-ghost btn-sm\" data-action=\"logout\">↩ Se déconnecter</button>"+
         "</div>"+
       "</nav>"+
       "<div class=\"main\">"+
         "<div class=\"topbar\"><div><h1>"+escHtml(TAB_TITLES[ui.tab]||"")+"</h1></div>"+
-          "<div class=\"topbar-meta\">"+(state.transactions.length)+" mouvement(s) enregistré(s)</div>"+
+          "<div class=\"topbar-meta\">"+(hasSection?(state.transactions.length+" mouvement(s) enregistré(s)"):"")+"</div>"+
         "</div>"+
         "<div class=\"content\" id=\"tabcontent\"></div>"+
       "</div>"+
@@ -237,11 +311,74 @@ function render(){
     dashboard:renderDashboard, mouvements:renderMouvements, comptes:renderComptes,
     categories:renderCategories, referentiels:renderReferentiels, budget:renderBudget,
     resultat:renderResultat, mensuelle:renderMensuelle, 'depenses-recettes':renderDepensesRecettes,
-    bilan:renderBilan, anomalies:renderAnomalies, users:renderUsers
+    bilan:renderBilan, anomalies:renderAnomalies, users:renderUsers,
+    'vue-globale':renderVueGlobale, sections:renderSections
   };
-  (renderers[ui.tab]||renderDashboard)(tc);
+  (renderers[ui.tab]||(hasSection?renderDashboard:renderVueGlobale))(tc);
+
+  var switchEl=document.getElementById("section-switch");
+  if(switchEl){
+    switchEl.addEventListener("change",function(){
+      var v=this.value;
+      if(v) switchToSection(Number(v)); else switchToGlobal();
+    });
+  }
 
   if(ui.modal) openModalContent(); else closeModalDom();
+}
+
+/* ================= VUE GLOBALE (administrateur général) ================= */
+function renderVueGlobale(el){
+  if(globalSections===null){ el.innerHTML="<div class=\"empty\">Chargement…</div>"; return; }
+  if(!globalSections.length){
+    el.innerHTML="<div class=\"card\"><div class=\"card-body\"><p>Aucune section n'a encore été créée pour l'association.</p>"+
+      "<button class=\"btn btn-primary btn-sm\" data-nav=\"sections\">Créer la première section</button></div></div>";
+    return;
+  }
+  var totRes=0,totTres=0,totProd=0,totCharges=0,totMv=0;
+  globalSections.forEach(function(s){
+    var sm=s.summary||{};
+    totRes+=sm.resultat||0; totTres+=sm.tresorerie||0; totProd+=sm.produits||0; totCharges+=sm.charges||0; totMv+=sm.nbMouvements||0;
+  });
+  var rows=globalSections.map(function(s){
+    var sm=s.summary||{};
+    return "<tr><td>"+escHtml(s.name)+"</td>"+
+      "<td class=\"num\">"+fmtMoney(sm.produits||0)+"</td>"+
+      "<td class=\"num\">"+fmtMoney(sm.charges||0)+"</td>"+
+      "<td class=\"num "+((sm.resultat||0)<0?"neg":"pos")+"\">"+fmtMoney(sm.resultat||0)+"</td>"+
+      "<td class=\"num\">"+fmtMoney(sm.tresorerie||0)+"</td>"+
+      "<td class=\"num\">"+(sm.nbMouvements||0)+"</td>"+
+      "<td style=\"text-align:right\"><button class=\"btn btn-ghost btn-sm\" data-action=\"open-section\" data-id=\""+s.id+"\">Ouvrir →</button></td></tr>";
+  }).join("");
+  el.innerHTML=
+    "<div class=\"grid-tiles\">"+
+      "<div class=\"tile\"><div class=\"tile-label\">Sections</div><div class=\"tile-val\">"+globalSections.length+"</div></div>"+
+      "<div class=\"tile\"><div class=\"tile-label\">Résultat cumulé</div><div class=\"tile-val "+(totRes<0?"neg":"pos")+"\">"+fmtMoney(totRes)+"</div></div>"+
+      "<div class=\"tile\"><div class=\"tile-label\">Trésorerie cumulée</div><div class=\"tile-val\">"+fmtMoney(totTres)+"</div></div>"+
+      "<div class=\"tile\"><div class=\"tile-label\">Mouvements enregistrés</div><div class=\"tile-val\">"+totMv+"</div></div>"+
+    "</div>"+
+    "<div class=\"card\"><div class=\"card-head\"><div><h2>Sections de l'association</h2><p>Chaque section est confidentielle aux autres. Cliquez pour l'ouvrir en détail.</p></div></div>"+
+    "<div class=\"card-body pad0\"><div class=\"tablewrap\"><table><thead><tr><th>Section</th><th class=\"num\">Produits</th><th class=\"num\">Charges</th><th class=\"num\">Résultat</th><th class=\"num\">Trésorerie</th><th class=\"num\">Mouvements</th><th></th></tr></thead><tbody>"+rows+"</tbody></table></div></div></div>";
+}
+
+/* ================= SECTIONS (administration, administrateur général) ================= */
+function renderSections(el){
+  if(globalSections===null){ el.innerHTML="<div class=\"empty\">Chargement…</div>"; return; }
+  var rows=globalSections.map(function(s){
+    var nbMv=(s.summary&&s.summary.nbMouvements)||0;
+    return "<tr><td>"+escHtml(s.name)+"</td><td class=\"num\">"+nbMv+"</td>"+
+      "<td style=\"text-align:right;white-space:nowrap\">"+
+      "<button class=\"btn btn-ghost btn-sm\" data-action=\"open-section\" data-id=\""+s.id+"\">Ouvrir</button> "+
+      "<button class=\"btn btn-ghost btn-sm\" data-action=\"rename-section\" data-id=\""+s.id+"\">Renommer</button> "+
+      "<button class=\"btn btn-ghost btn-sm btn-danger\" data-action=\"delete-section\" data-id=\""+s.id+"\">Supprimer</button>"+
+      "</td></tr>";
+  }).join("");
+  el.innerHTML="<div class=\"card\"><div class=\"card-head\"><div><h2>Sections de l'association</h2><p>Chaque section a ses propres comptes, mouvements et membres, invisibles pour les autres sections. Vous seul, en tant qu'administrateur général, voyez tout.</p></div></div>"+
+    "<div class=\"card-body pad0\"><div class=\"tablewrap\"><table><thead><tr><th>Nom</th><th class=\"num\">Mouvements</th><th></th></tr></thead><tbody>"+(rows||"<tr><td colspan=\"3\" class=\"empty\">Aucune section.</td></tr>")+"</tbody></table></div></div>"+
+    "<div class=\"card-body\" style=\"border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap\">"+
+      "<input type=\"text\" id=\"new-section-name\" placeholder=\"Nom de la nouvelle section (ex. Section Football)\" style=\"max-width:320px\">"+
+      "<button class=\"btn btn-primary btn-sm\" data-action=\"add-section\">+ Créer la section</button>"+
+    "</div></div>";
 }
 
 /* ================= DASHBOARD ================= */
@@ -357,7 +494,7 @@ function renderMouvements(el){
   el.innerHTML=
     "<div class=\"card\">"+
     "<div class=\"card-head\"><div><h2>Journal des mouvements</h2><p>"+list.length+" opération(s) affichée(s)</p></div>"+
-    "<button class=\"btn btn-primary\" data-action=\"new-transaction\">+ Nouveau mouvement</button></div>"+
+    "<div style=\"display:flex;gap:8px\"><button class=\"btn btn-ghost\" data-action=\"export-mouvements\">Exporter (Excel)</button><button class=\"btn btn-primary\" data-action=\"new-transaction\">+ Nouveau mouvement</button></div></div>"+
     "<div class=\"filterbar\">"+
       "<input type=\"search\" placeholder=\"Rechercher…\" id=\"f-q\" value=\""+escHtml(ui.filters.q)+"\">"+
       "<select id=\"f-type\"><option value=\"\">Tous types</option><option value=\"entree\""+(ui.filters.type==="entree"?" selected":"")+">Entrée</option><option value=\"sortie\""+(ui.filters.type==="sortie"?" selected":"")+">Sortie</option><option value=\"transfert\""+(ui.filters.type==="transfert"?" selected":"")+">Transfert</option></select>"+
@@ -380,7 +517,7 @@ function renderComptes(el){
   var rows=(state.accounts||[]).map(function(a){
     var bal=computeAccountBalance(a.id);
     return "<tr><td>"+escHtml(a.name)+"</td><td class=\"num\">"+fmtMoney(a.opening)+"</td><td class=\"num "+(bal<0?"neg":"")+"\">"+fmtMoney(bal)+"</td>"+
-      "<td style=\"text-align:right\"><button class=\"btn btn-ghost btn-sm\" data-action=\"edit-account\" data-id=\""+a.id+"\">Modifier</button> <button class=\"btn btn-ghost btn-sm btn-danger\" data-action=\"delete-account\" data-id=\""+a.id+"\">Supprimer</button></td></tr>";
+      "<td style=\"text-align:right;white-space:nowrap\"><button class=\"btn btn-ghost btn-sm\" data-action=\"export-account\" data-id=\""+a.id+"\">Exporter (Excel)</button> <button class=\"btn btn-ghost btn-sm\" data-action=\"edit-account\" data-id=\""+a.id+"\">Modifier</button> <button class=\"btn btn-ghost btn-sm btn-danger\" data-action=\"delete-account\" data-id=\""+a.id+"\">Supprimer</button></td></tr>";
   }).join("");
   el.innerHTML="<div class=\"card\"><div class=\"card-head\"><div><h2>Comptes du club</h2><p>Caisse, banque, livret, trésorerie vive… chaque compte a un solde de départ et un solde calculé.</p></div>"+
     "<button class=\"btn btn-primary\" data-action=\"new-account\">+ Nouveau compte</button></div>"+
@@ -581,25 +718,35 @@ function renderUsers(el){
     el.innerHTML="<div class=\"empty\">Chargement…</div>";
     return;
   }
+  var isSuper=currentUser.role==="super_admin";
   var rows=ui.users.map(function(u){
     var isSelf=currentUser&&currentUser.id===u.id;
+    var roleLabel=u.role==="super_admin"?"Admin général":(u.role==="admin"?"Admin section":"Membre");
+    var roleClass=u.role==="member"?" member":"";
+    var actions="";
+    if(u.role!=="super_admin"){
+      actions+="<button class=\"btn btn-ghost btn-sm\" data-action=\"toggle-role\" data-id=\""+u.id+"\" data-role=\""+(u.role==="admin"?"member":"admin")+"\">"+(u.role==="admin"?"Rétrograder":"Promouvoir admin")+"</button> ";
+    }
+    actions+="<button class=\"btn btn-ghost btn-sm\" data-action=\"reset-password\" data-id=\""+u.id+"\">Changer mot de passe</button> ";
+    if(!(u.role==="super_admin"&&isSelf)){
+      actions+="<button class=\"btn btn-ghost btn-sm btn-danger\" data-action=\"delete-user\" data-id=\""+u.id+"\">Supprimer</button>";
+    }
     return "<tr><td>"+escHtml(u.displayName)+(isSelf?" <span style=\"color:var(--ink-faint);font-size:11.5px\">(vous)</span>":"")+"</td>"+
       "<td>"+escHtml(u.username)+"</td>"+
-      "<td><span class=\"roleflag"+(u.role==="admin"?"":" member")+"\">"+(u.role==="admin"?"Admin":"Membre")+"</span></td>"+
-      "<td style=\"text-align:right;white-space:nowrap\">"+
-        "<button class=\"btn btn-ghost btn-sm\" data-action=\"toggle-role\" data-id=\""+u.id+"\" data-role=\""+(u.role==="admin"?"member":"admin")+"\">"+(u.role==="admin"?"Rétrograder":"Promouvoir admin")+"</button> "+
-        "<button class=\"btn btn-ghost btn-sm\" data-action=\"reset-password\" data-id=\""+u.id+"\">Changer mot de passe</button> "+
-        "<button class=\"btn btn-ghost btn-sm btn-danger\" data-action=\"delete-user\" data-id=\""+u.id+"\">Supprimer</button>"+
-      "</td></tr>";
+      (isSuper?("<td>"+escHtml(u.sectionName||"—")+"</td>"):"")+
+      "<td><span class=\"roleflag"+roleClass+"\">"+roleLabel+"</span></td>"+
+      "<td style=\"text-align:right;white-space:nowrap\">"+actions+"</td></tr>";
   }).join("");
-  el.innerHTML="<div class=\"card\"><div class=\"card-head\"><div><h2>Comptes du bureau</h2><p>Gérez qui peut se connecter à l'application.</p></div></div>"+
-    "<div class=\"card-body pad0\"><div class=\"tablewrap\"><table><thead><tr><th>Nom</th><th>Identifiant</th><th>Rôle</th><th></th></tr></thead><tbody>"+(rows||"<tr><td colspan=\"4\" class=\"empty\">Aucun utilisateur.</td></tr>")+"</tbody></table></div></div></div>"+
+  var sectionField=isSuper?("<div class=\"field\"><label>Section</label><select id=\"nu-section\"><option value=\"\">Choisir…</option>"+opt(globalSections||[],"")+"</select></div>"):"";
+  el.innerHTML="<div class=\"card\"><div class=\"card-head\"><div><h2>"+(isSuper?"Comptes de l'association":"Comptes de la section")+"</h2><p>Gérez qui peut se connecter à l'application.</p></div></div>"+
+    "<div class=\"card-body pad0\"><div class=\"tablewrap\"><table><thead><tr><th>Nom</th><th>Identifiant</th>"+(isSuper?"<th>Section</th>":"")+"<th>Rôle</th><th></th></tr></thead><tbody>"+(rows||("<tr><td colspan=\""+(isSuper?5:4)+"\" class=\"empty\">Aucun utilisateur.</td></tr>"))+"</tbody></table></div></div></div>"+
     "<div class=\"card\"><div class=\"card-head\"><h2>Ajouter un membre</h2></div><div class=\"card-body\">"+
     "<div class=\"formgrid\">"+
     "<div class=\"field\"><label>Nom affiché</label><input type=\"text\" id=\"nu-display\"></div>"+
     "<div class=\"field\"><label>Identifiant</label><input type=\"text\" id=\"nu-username\"></div>"+
     "<div class=\"field\"><label>Mot de passe</label><input type=\"password\" id=\"nu-password\"></div>"+
-    "<div class=\"field\"><label>Rôle</label><select id=\"nu-role\"><option value=\"member\">Membre</option><option value=\"admin\">Administrateur</option></select></div>"+
+    "<div class=\"field\"><label>Rôle</label><select id=\"nu-role\"><option value=\"member\">Membre</option><option value=\"admin\">Administrateur de section</option></select></div>"+
+    sectionField+
     "</div><button class=\"btn btn-primary btn-sm\" data-action=\"add-user\">+ Créer le compte</button></div></div>";
 }
 function loadUsers(){
@@ -726,7 +873,15 @@ function confirmModal(){
 document.addEventListener("click",function(e){
   var navBtn=e.target.closest("[data-nav]");
   if(navBtn){
-    ui.tab=navBtn.getAttribute("data-nav");
+    var navId=navBtn.getAttribute("data-nav");
+    if(navId==="vue-globale"){ switchToGlobal(); return; }
+    if(navId==="sections"){
+      ui.activeSection=null; state=null; ui.tab="sections";
+      render();
+      if(globalSections===null) refreshGlobalSections();
+      return;
+    }
+    ui.tab=navId;
     render();
     if(ui.tab==="users") loadUsers();
     return;
@@ -742,7 +897,7 @@ document.addEventListener("click",function(e){
       openModal("transaction",t?JSON.parse(JSON.stringify(t)):null); break;
     }
     case "delete-transaction": askConfirm("Supprimer le mouvement","Cette action est définitive.",function(){
-      api("/api/transactions/"+id,{method:"DELETE"}).then(function(){
+      api("/api/transactions/"+id+sectionQS(),{method:"DELETE"}).then(function(){
         state.transactions=state.transactions.filter(function(x){return String(x.id)!==String(id);});
         toast("Mouvement supprimé."); render();
       }).catch(function(e){ toast("Erreur : "+e.message,true); render(); });
@@ -837,10 +992,57 @@ document.addEventListener("click",function(e){
       var username=document.getElementById("nu-username").value.trim();
       var password=document.getElementById("nu-password").value;
       var role=document.getElementById("nu-role").value;
+      var payload={username:username,password:password,displayName:displayName,role:role};
+      if(currentUser.role==="super_admin"){
+        var secEl=document.getElementById("nu-section");
+        var sectionId=secEl&&Number(secEl.value);
+        if(!sectionId){ toast("Choisissez une section pour ce compte.",true); break; }
+        payload.sectionId=sectionId;
+      }
       if(!username||password.length<6){ toast("Identifiant requis et mot de passe de 6 caractères minimum.",true); break; }
-      api("/api/users",{method:"POST",body:JSON.stringify({username:username,password:password,displayName:displayName,role:role})}).then(function(u){
-        ui.users.push(u); toast("Compte créé pour "+u.displayName+"."); render();
+      api("/api/users",{method:"POST",body:JSON.stringify(payload)}).then(function(u){
+        toast("Compte créé pour "+u.displayName+"."); loadUsers();
       }).catch(function(e){ toast("Erreur : "+e.message,true); });
+      break;
+    }
+    case "open-section": switchToSection(Number(id)); break;
+    case "add-section": {
+      var inp=document.getElementById("new-section-name");
+      var name=inp&&inp.value.trim();
+      if(!name){ toast("Nom de section requis.",true); break; }
+      api("/api/sections",{method:"POST",body:JSON.stringify({name:name})}).then(function(s){
+        toast("Section « "+s.name+" » créée."); refreshGlobalSections();
+      }).catch(function(e){ toast("Erreur : "+e.message,true); });
+      break;
+    }
+    case "rename-section": {
+      var secS=(globalSections||[]).find(function(x){return String(x.id)===String(id);});
+      var newName=prompt("Nouveau nom de la section",secS?secS.name:"");
+      if(newName&&newName.trim()){
+        api("/api/sections/"+id,{method:"PUT",body:JSON.stringify({name:newName.trim()})}).then(function(){
+          toast("Section renommée."); refreshGlobalSections();
+        }).catch(function(e){ toast("Erreur : "+e.message,true); });
+      }
+      break;
+    }
+    case "delete-section": {
+      var secD=(globalSections||[]).find(function(x){return String(x.id)===String(id);});
+      askConfirm("Supprimer la section",(secD?("« "+secD.name+" » — "):"")+"possible uniquement si elle est vide (aucun mouvement, aucun membre).",function(){
+        api("/api/sections/"+id,{method:"DELETE"}).then(function(){
+          toast("Section supprimée."); refreshGlobalSections();
+        }).catch(function(e){ toast("Erreur : "+e.message,true); });
+      });
+      break;
+    }
+    case "export-account": {
+      var accId=Number(id);
+      var acc=accountById(accId);
+      var listAcc=(state.transactions||[]).filter(function(t){ return t.accountId===accId||t.toAccountId===accId; });
+      downloadCsv("mouvements_"+slugify(acc?acc.name:accId)+".csv",txToCsvRows(listAcc));
+      break;
+    }
+    case "export-mouvements": {
+      downloadCsv("mouvements_"+slugify(state.meta.club)+".csv",txToCsvRows(filteredTx()));
       break;
     }
     case "toggle-role": {
@@ -915,7 +1117,7 @@ function submitTransaction(){
     tx.catId=Number(document.getElementById("tx-cat").value);
     tx.subId=Number(document.getElementById("tx-sub").value)||null;
   }
-  var req=editId?api("/api/transactions/"+editId,{method:"PUT",body:JSON.stringify(tx)}):api("/api/transactions",{method:"POST",body:JSON.stringify(tx)});
+  var req=editId?api("/api/transactions/"+editId+sectionQS(),{method:"PUT",body:JSON.stringify(tx)}):api("/api/transactions"+sectionQS(),{method:"POST",body:JSON.stringify(tx)});
   req.then(function(saved){
     if(editId){
       var idx=state.transactions.findIndex(function(x){return String(x.id)===String(editId);});
@@ -951,6 +1153,46 @@ function submitSettings(){
   state.meta.seasonStartYear=Number(document.getElementById("set-year").value)||state.meta.seasonStartYear;
   closeModal();
   saveConfig("Paramètres enregistrés.");
+}
+
+/* ================= EXPORT EXCEL (CSV) ================= */
+function csvEscape(v){
+  var s=String(v===undefined||v===null?"":v);
+  if(/[";\n]/.test(s)) s='"'+s.replace(/"/g,'""')+'"';
+  return s;
+}
+function fmtNumCsv(n){ return String(Number(n)||0).replace(".",","); }
+function slugify(s){
+  return String(s||"export").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-zA-Z0-9]+/g,"_").replace(/^_+|_+$/g,"").toLowerCase()||"export";
+}
+function txToCsvRows(list){
+  var header=["Date opération","Date saisie","Type","Montant","Compte","Compte destinataire","Catégorie","Sous-catégorie","Fournisseur","Salarié","Description","Événement","Référence","Commentaire","Validé","Créé par","Modifié par"];
+  var lines=[header.map(csvEscape).join(";")];
+  list.forEach(function(t){
+    var acc=accountById(t.accountId);
+    var toAcc=accountById(t.toAccountId);
+    var catName="",subName="";
+    if(t.type!=="transfert"){
+      var c=catById(t.type,t.catId); catName=c?c.name:"";
+      var s=subById(t.type,t.catId,t.subId); subName=s?s.name:"";
+    }
+    var typeLabel=t.type==="entree"?"Entrée":(t.type==="sortie"?"Sortie":"Transfert");
+    lines.push([
+      fmtDate(t.dateOp),fmtDate(t.dateSaisie),typeLabel,fmtNumCsv(t.montant),
+      acc?acc.name:"",toAcc?toAcc.name:"",catName,subName,
+      t.fournisseur||"",t.salarie||"",t.description||"",t.evenement||"",
+      t.reference||"",t.commentaire||"",t.valide?"Oui":"Non",t.createdBy||"",t.updatedBy||""
+    ].map(csvEscape).join(";"));
+  });
+  return lines.join("\r\n");
+}
+function downloadCsv(filename,content){
+  var blob=new Blob(["\uFEFF"+content],{type:"text/csv;charset=utf-8;"});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement("a");
+  a.href=url; a.download=filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); },0);
 }
 
 /* ================= INIT ================= */

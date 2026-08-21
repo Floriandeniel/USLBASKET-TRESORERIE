@@ -65,18 +65,43 @@ function serveStatic(req, res, pathname) {
 function requireAuth(req, res) {
   const session = auth.sessionFromRequest(req);
   if (!session) { sendJson(res, 401, { error: "not_authenticated" }); return null; }
-  return session;
+  const u = store.getUserById(session.uid);
+  if (!u) { sendJson(res, 401, { error: "not_authenticated" }); return null; }
+  return u;
 }
-function requireAdmin(req, res) {
-  const session = requireAuth(req, res);
-  if (!session) return null;
-  if (session.role !== "admin") { sendJson(res, 403, { error: "forbidden" }); return null; }
-  return session;
+function requireSuperAdmin(req, res) {
+  const u = requireAuth(req, res);
+  if (!u) return null;
+  if (u.role !== "super_admin") { sendJson(res, 403, { error: "forbidden" }); return null; }
+  return u;
+}
+function requireSectionAdmin(req, res) {
+  // admin OR super_admin (super_admin must specify a section via query, checked by caller)
+  const u = requireAuth(req, res);
+  if (!u) return null;
+  if (u.role !== "admin" && u.role !== "super_admin") { sendJson(res, 403, { error: "forbidden" }); return null; }
+  return u;
+}
+
+/* Détermine la section "active" pour cette requête :
+   - utilisateur de section (admin/membre) : toujours SA section, le client ne peut pas la changer.
+   - super_admin : doit préciser ?section=ID (sinon 400), car il peut voir n'importe quelle section. */
+function resolveSectionId(req, url, res, u) {
+  if (u.role !== "super_admin") {
+    if (!u.section_id) { sendJson(res, 409, { error: "no_section", message: "Ce compte n'est rattaché à aucune section." }); return null; }
+    return u.section_id;
+  }
+  const q = url.searchParams.get("section");
+  const sectionId = Number(q);
+  if (!q || !Number.isFinite(sectionId)) { sendJson(res, 400, { error: "section_required", message: "Section non précisée." }); return null; }
+  const section = store.getSectionById(sectionId);
+  if (!section) { sendJson(res, 404, { error: "section_not_found" }); return null; }
+  return sectionId;
 }
 
 function publicUser(u) {
   if (!u) return null;
-  return { id: u.id, username: u.username, displayName: u.display_name, role: u.role };
+  return { id: u.id, username: u.username, displayName: u.display_name, role: u.role, sectionId: u.section_id };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -95,17 +120,25 @@ const server = http.createServer(async (req, res) => {
       if (!session) return sendJson(res, 200, { authenticated: false, needsSetup });
       const u = store.getUserById(session.uid);
       if (!u) return sendJson(res, 200, { authenticated: false, needsSetup });
-      return sendJson(res, 200, { authenticated: true, needsSetup: false, user: publicUser(u) });
+      const out = { authenticated: true, needsSetup: false, user: publicUser(u) };
+      if (u.role === "super_admin") {
+        out.sections = store.listSections();
+      } else if (u.section_id) {
+        out.section = store.getSectionById(u.section_id);
+      }
+      return sendJson(res, 200, out);
     }
 
     if (pathname === "/api/setup" && method === "POST") {
+      // Premier compte jamais créé sur l'appli : devient administrateur général (super_admin),
+      // rattaché à aucune section. Il crée ensuite ses sections depuis l'application.
       if (store.countUsers() > 0) return sendJson(res, 409, { error: "already_initialized" });
       const body = await readJsonBody(req);
       const username = (body.username || "").trim().toLowerCase();
       const password = body.password || "";
       const displayName = (body.displayName || "").trim() || username;
       if (!username || password.length < 6) return sendJson(res, 400, { error: "invalid_input", message: "Identifiant requis, mot de passe de 6 caractères minimum." });
-      const u = store.createUser({ username, passwordHash: auth.hashPassword(password), displayName, role: "admin" });
+      const u = store.createUser({ username, passwordHash: auth.hashPassword(password), displayName, role: "super_admin", sectionId: null });
       res.setHeader("Set-Cookie", auth.makeSessionCookie(u));
       return sendJson(res, 200, { ok: true, user: publicUser(u) });
     }
@@ -127,91 +160,187 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    /* ---------------- SECTIONS (super_admin uniquement) ---------------- */
+    if (pathname === "/api/sections" && method === "GET") {
+      const u = requireAuth(req, res);
+      if (!u) return;
+      if (u.role === "super_admin") {
+        const sections = store.listSections().map((s) => {
+          const cfg = store.getConfig(s.id);
+          const txs = store.listTransactions(s.id);
+          return { ...s, summary: sectionSummary(cfg, txs) };
+        });
+        return sendJson(res, 200, sections);
+      }
+      if (u.section_id) return sendJson(res, 200, [store.getSectionById(u.section_id)]);
+      return sendJson(res, 200, []);
+    }
+    if (pathname === "/api/sections" && method === "POST") {
+      if (!requireSuperAdmin(req, res)) return;
+      const body = await readJsonBody(req);
+      const name = (body.name || "").trim();
+      if (!name) return sendJson(res, 400, { error: "invalid_input", message: "Nom de section requis." });
+      if (name.length > 80) return sendJson(res, 400, { error: "invalid_input", message: "Nom trop long." });
+      const existing = store.listSections().find((s) => s.name.toLowerCase() === name.toLowerCase());
+      if (existing) return sendJson(res, 409, { error: "name_taken", message: "Une section porte déjà ce nom." });
+      const section = store.createSection(name);
+      return sendJson(res, 200, section);
+    }
+    const sectionIdMatch = pathname.match(/^\/api\/sections\/(\d+)$/);
+    if (sectionIdMatch && method === "PUT") {
+      if (!requireSuperAdmin(req, res)) return;
+      const id = Number(sectionIdMatch[1]);
+      const body = await readJsonBody(req);
+      const name = (body.name || "").trim();
+      if (!name) return sendJson(res, 400, { error: "invalid_input", message: "Nom requis." });
+      const section = store.renameSection(id, name);
+      if (!section) return sendJson(res, 404, { error: "not_found" });
+      return sendJson(res, 200, section);
+    }
+    if (sectionIdMatch && method === "DELETE") {
+      if (!requireSuperAdmin(req, res)) return;
+      const id = Number(sectionIdMatch[1]);
+      if (store.sectionHasData(id)) {
+        return sendJson(res, 400, { error: "not_empty", message: "Cette section contient encore des mouvements ou des membres. Videz-la avant de la supprimer." });
+      }
+      const ok = store.deleteSection(id);
+      if (!ok) return sendJson(res, 404, { error: "not_found" });
+      return sendJson(res, 200, { ok: true });
+    }
+
+    /* ---------------- USERS ---------------- */
     if (pathname === "/api/users" && method === "GET") {
-      if (!requireAdmin(req, res)) return;
-      return sendJson(res, 200, store.listUsers().map((u) => ({ id: u.id, username: u.username, displayName: u.display_name, role: u.role, createdAt: u.created_at })));
+      const u = requireSectionAdmin(req, res);
+      if (!u) return;
+      if (u.role === "super_admin") {
+        return sendJson(res, 200, store.listUsers(null).map((r) => ({
+          id: r.id, username: r.username, displayName: r.display_name, role: r.role,
+          sectionId: r.section_id, sectionName: r.section_name || null, createdAt: r.created_at
+        })));
+      }
+      return sendJson(res, 200, store.listUsers(u.section_id).map((r) => ({
+        id: r.id, username: r.username, displayName: r.display_name, role: r.role,
+        sectionId: r.section_id, createdAt: r.created_at
+      })));
     }
     if (pathname === "/api/users" && method === "POST") {
-      if (!requireAdmin(req, res)) return;
+      const u = requireSectionAdmin(req, res);
+      if (!u) return;
       const body = await readJsonBody(req);
       const username = (body.username || "").trim().toLowerCase();
       const password = body.password || "";
       const displayName = (body.displayName || "").trim() || username;
-      const role = body.role === "admin" ? "admin" : "member";
+      const role = body.role === "admin" ? "admin" : "member"; // jamais super_admin via l'API
+      let sectionId;
+      if (u.role === "super_admin") {
+        sectionId = Number(body.sectionId);
+        if (!sectionId || !store.getSectionById(sectionId)) return sendJson(res, 400, { error: "invalid_section", message: "Section invalide." });
+      } else {
+        sectionId = u.section_id;
+      }
       if (!username || password.length < 6) return sendJson(res, 400, { error: "invalid_input", message: "Identifiant requis, mot de passe de 6 caractères minimum." });
       if (store.getUserByUsername(username)) return sendJson(res, 409, { error: "username_taken" });
-      const u = store.createUser({ username, passwordHash: auth.hashPassword(password), displayName, role });
-      return sendJson(res, 200, publicUser(u));
+      const created = store.createUser({ username, passwordHash: auth.hashPassword(password), displayName, role, sectionId });
+      return sendJson(res, 200, publicUser(created));
     }
     const userIdMatch = pathname.match(/^\/api\/users\/(\d+)$/);
     if (userIdMatch && method === "PUT") {
-      const session = requireAdmin(req, res);
-      if (!session) return;
+      const u = requireSectionAdmin(req, res);
+      if (!u) return;
       const id = Number(userIdMatch[1]);
+      const target = store.getUserById(id);
+      if (!target) return sendJson(res, 404, { error: "not_found" });
+      if (u.role !== "super_admin" && target.section_id !== u.section_id) return sendJson(res, 403, { error: "forbidden" });
+      if (target.role === "super_admin" && u.role !== "super_admin") return sendJson(res, 403, { error: "forbidden" });
       const body = await readJsonBody(req);
       const fields = {};
       if (body.displayName !== undefined) fields.displayName = String(body.displayName).trim();
-      if (body.role !== undefined) fields.role = body.role === "admin" ? "admin" : "member";
+      if (body.role !== undefined && target.role !== "super_admin") fields.role = body.role === "admin" ? "admin" : "member";
       if (body.password) {
         if (String(body.password).length < 6) return sendJson(res, 400, { error: "invalid_input", message: "Mot de passe trop court." });
         fields.passwordHash = auth.hashPassword(body.password);
       }
-      if (fields.role === "member" && store.getUserById(id) && store.getUserById(id).role === "admin" && store.countAdmins() <= 1) {
-        return sendJson(res, 400, { error: "last_admin", message: "Impossible de retirer le dernier administrateur." });
+      if (fields.role === "member" && target.role === "admin" && store.countSectionAdmins(target.section_id) <= 1) {
+        return sendJson(res, 400, { error: "last_admin", message: "Impossible de retirer le dernier administrateur de cette section." });
       }
-      const u = store.updateUser(id, fields);
-      if (!u) return sendJson(res, 404, { error: "not_found" });
-      return sendJson(res, 200, publicUser(u));
+      const updated = store.updateUser(id, fields);
+      if (!updated) return sendJson(res, 404, { error: "not_found" });
+      return sendJson(res, 200, publicUser(updated));
     }
     if (userIdMatch && method === "DELETE") {
-      const session = requireAdmin(req, res);
-      if (!session) return;
+      const u = requireSectionAdmin(req, res);
+      if (!u) return;
       const id = Number(userIdMatch[1]);
       const target = store.getUserById(id);
       if (!target) return sendJson(res, 404, { error: "not_found" });
-      if (target.role === "admin" && store.countAdmins() <= 1) return sendJson(res, 400, { error: "last_admin", message: "Impossible de supprimer le dernier administrateur." });
+      if (u.role !== "super_admin" && target.section_id !== u.section_id) return sendJson(res, 403, { error: "forbidden" });
+      if (target.role === "super_admin") {
+        if (u.role !== "super_admin") return sendJson(res, 403, { error: "forbidden" });
+        if (store.countSuperAdmins() <= 1) return sendJson(res, 400, { error: "last_admin", message: "Impossible de supprimer le dernier administrateur général." });
+      }
+      if (target.role === "admin" && store.countSectionAdmins(target.section_id) <= 1) {
+        return sendJson(res, 400, { error: "last_admin", message: "Impossible de supprimer le dernier administrateur de cette section." });
+      }
       store.deleteUser(id);
       return sendJson(res, 200, { ok: true });
     }
 
+    /* ---------------- CONFIG (scopé à la section active) ---------------- */
     if (pathname === "/api/config" && method === "GET") {
-      if (!requireAuth(req, res)) return;
-      return sendJson(res, 200, store.getConfig());
+      const u = requireAuth(req, res);
+      if (!u) return;
+      const sectionId = resolveSectionId(req, url, res, u);
+      if (sectionId === null) return;
+      return sendJson(res, 200, store.getConfig(sectionId));
     }
     if (pathname === "/api/config" && method === "PUT") {
-      if (!requireAuth(req, res)) return;
+      const u = requireAuth(req, res);
+      if (!u) return;
+      const sectionId = resolveSectionId(req, url, res, u);
+      if (sectionId === null) return;
       const body = await readJsonBody(req);
       if (!body || typeof body !== "object") return sendJson(res, 400, { error: "invalid_input" });
-      store.setConfig(body);
+      store.setConfig(sectionId, body);
       return sendJson(res, 200, { ok: true });
     }
 
+    /* ---------------- TRANSACTIONS (scopées à la section active) ---------------- */
     if (pathname === "/api/transactions" && method === "GET") {
-      if (!requireAuth(req, res)) return;
-      return sendJson(res, 200, store.listTransactions());
+      const u = requireAuth(req, res);
+      if (!u) return;
+      const sectionId = resolveSectionId(req, url, res, u);
+      if (sectionId === null) return;
+      return sendJson(res, 200, store.listTransactions(sectionId));
     }
     if (pathname === "/api/transactions" && method === "POST") {
-      const session = requireAuth(req, res);
-      if (!session) return;
+      const u = requireAuth(req, res);
+      if (!u) return;
+      const sectionId = resolveSectionId(req, url, res, u);
+      if (sectionId === null) return;
       const body = await readJsonBody(req);
       if (!body.type || !body.montant) return sendJson(res, 400, { error: "invalid_input" });
-      const tx = store.createTransaction(body, session.username);
+      const tx = store.createTransaction(sectionId, body, u.username);
       return sendJson(res, 200, tx);
     }
     const txIdMatch = pathname.match(/^\/api\/transactions\/(\d+)$/);
     if (txIdMatch && method === "PUT") {
-      const session = requireAuth(req, res);
-      if (!session) return;
+      const u = requireAuth(req, res);
+      if (!u) return;
+      const sectionId = resolveSectionId(req, url, res, u);
+      if (sectionId === null) return;
       const id = Number(txIdMatch[1]);
       const body = await readJsonBody(req);
-      const tx = store.updateTransaction(id, body, session.username);
+      const tx = store.updateTransaction(sectionId, id, body, u.username);
       if (!tx) return sendJson(res, 404, { error: "not_found" });
       return sendJson(res, 200, tx);
     }
     if (txIdMatch && method === "DELETE") {
-      if (!requireAuth(req, res)) return;
+      const u = requireAuth(req, res);
+      if (!u) return;
+      const sectionId = resolveSectionId(req, url, res, u);
+      if (sectionId === null) return;
       const id = Number(txIdMatch[1]);
-      const ok = store.deleteTransaction(id);
+      const ok = store.deleteTransaction(sectionId, id);
       if (!ok) return sendJson(res, 404, { error: "not_found" });
       return sendJson(res, 200, { ok: true });
     }
@@ -228,6 +357,23 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 500, { error: "server_error" });
   }
 });
+
+/* Résumé minimal d'une section pour la vue globale de l'administrateur général. */
+function sectionSummary(cfg, transactions) {
+  var produits = 0, charges = 0;
+  transactions.forEach(function (t) {
+    if (t.type === "entree") produits += t.montant;
+    else if (t.type === "sortie") charges += t.montant;
+  });
+  var accounts = cfg.accounts || [];
+  var tresorerie = accounts.reduce(function (sum, a) { return sum + (Number(a.opening) || 0); }, 0);
+  transactions.forEach(function (t) {
+    if (t.type === "entree") tresorerie += t.montant;
+    else if (t.type === "sortie") tresorerie -= t.montant;
+    // les transferts ne changent pas le total tous-comptes-cumulés
+  });
+  return { produits, charges, resultat: produits - charges, tresorerie, nbMouvements: transactions.length };
+}
 
 server.listen(PORT, () => {
   console.log(`USL Trésorerie en écoute sur le port ${PORT}`);
