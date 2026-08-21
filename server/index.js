@@ -42,6 +42,13 @@ function readJsonBody(req) {
     req.on("error", reject);
   });
 }
+// Aucun des fichiers statiques (HTML/JS/CSS) n'est volumineux ni ne change souvent en dehors
+// des mises à jour de l'application : on préfère systématiquement forcer les navigateurs
+// (notamment mobiles, plus agressifs en cache) à revalider à chaque chargement, plutôt que de
+// risquer qu'un téléphone continue longtemps à exécuter une version obsolète de app.js après
+// un déploiement (ce qui peut provoquer des erreurs très déroutantes côté utilisateur).
+const NO_CACHE_HEADERS = { "Cache-Control": "no-cache, no-store, must-revalidate" };
+
 function serveStatic(req, res, pathname) {
   let rel = pathname === "/" ? "/index.html" : pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, rel));
@@ -51,13 +58,13 @@ function serveStatic(req, res, pathname) {
       // SPA fallback for unknown non-api paths
       fs.readFile(path.join(PUBLIC_DIR, "index.html"), (err2, data2) => {
         if (err2) { res.writeHead(404); res.end("Not found"); return; }
-        res.writeHead(200, { "Content-Type": MIME[".html"] });
+        res.writeHead(200, { "Content-Type": MIME[".html"], ...NO_CACHE_HEADERS });
         res.end(data2);
       });
       return;
     }
     const ext = path.extname(filePath);
-    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream", ...NO_CACHE_HEADERS });
     res.end(data);
   });
 }
