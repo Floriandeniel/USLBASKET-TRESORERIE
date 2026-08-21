@@ -101,7 +101,7 @@ function resolveSectionId(req, url, res, u) {
 
 function publicUser(u) {
   if (!u) return null;
-  return { id: u.id, username: u.username, displayName: u.display_name, role: u.role, sectionId: u.section_id };
+  return { id: u.id, username: u.username, displayName: u.display_name, role: u.role, sectionId: u.section_id, locked: store.isUserLocked(u) };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -148,9 +148,36 @@ const server = http.createServer(async (req, res) => {
       const username = (body.username || "").trim().toLowerCase();
       const password = body.password || "";
       const u = store.getUserByUsername(username);
+
+      if (u && store.isUserLocked(u)) {
+        const mins = Math.max(1, Math.ceil((new Date(u.locked_until).getTime() - Date.now()) / 60000));
+        const hrs = Math.floor(mins / 60);
+        const remain = hrs >= 1 ? `${hrs} h` : `${mins} min`;
+        return sendJson(res, 423, {
+          error: "account_locked",
+          message: `Compte temporairement bloqué suite à plusieurs tentatives de connexion échouées. Réessayez dans environ ${remain}, ou demandez à un administrateur de débloquer votre compte.`
+        });
+      }
+
       if (!u || !auth.verifyPassword(password, u.password)) {
+        if (u) {
+          const updated = store.recordFailedLogin(u.id);
+          if (store.isUserLocked(updated)) {
+            return sendJson(res, 423, {
+              error: "account_locked",
+              message: "Trop de tentatives échouées : compte bloqué pendant 24h. Demandez à un administrateur de le débloquer si besoin."
+            });
+          }
+          const remaining = store.LOGIN_LOCK_THRESHOLD - updated.failed_attempts;
+          return sendJson(res, 401, {
+            error: "invalid_credentials",
+            message: `Identifiant ou mot de passe incorrect. Encore ${remaining} tentative(s) avant blocage temporaire du compte.`
+          });
+        }
         return sendJson(res, 401, { error: "invalid_credentials", message: "Identifiant ou mot de passe incorrect." });
       }
+
+      store.resetLoginAttempts(u.id);
       res.setHeader("Set-Cookie", auth.makeSessionCookie(u));
       return sendJson(res, 200, { ok: true, user: publicUser(u) });
     }
@@ -208,6 +235,12 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    /* ---------------- SAUVEGARDE COMPLÈTE (administrateur général) ---------------- */
+    if (pathname === "/api/backup" && method === "GET") {
+      if (!requireSuperAdmin(req, res)) return;
+      return sendJson(res, 200, { exportedAt: new Date().toISOString(), sections: store.fullBackup() });
+    }
+
     /* ---------------- USERS ---------------- */
     if (pathname === "/api/users" && method === "GET") {
       const u = requireSectionAdmin(req, res);
@@ -215,12 +248,14 @@ const server = http.createServer(async (req, res) => {
       if (u.role === "super_admin") {
         return sendJson(res, 200, store.listUsers(null).map((r) => ({
           id: r.id, username: r.username, displayName: r.display_name, role: r.role,
-          sectionId: r.section_id, sectionName: r.section_name || null, createdAt: r.created_at
+          sectionId: r.section_id, sectionName: r.section_name || null, createdAt: r.created_at,
+          locked: store.isUserLocked({ locked_until: r.locked_until })
         })));
       }
       return sendJson(res, 200, store.listUsers(u.section_id).map((r) => ({
         id: r.id, username: r.username, displayName: r.display_name, role: r.role,
-        sectionId: r.section_id, createdAt: r.created_at
+        sectionId: r.section_id, createdAt: r.created_at,
+        locked: store.isUserLocked({ locked_until: r.locked_until })
       })));
     }
     if (pathname === "/api/users" && method === "POST") {
@@ -263,6 +298,7 @@ const server = http.createServer(async (req, res) => {
       if (fields.role === "member" && target.role === "admin" && store.countSectionAdmins(target.section_id) <= 1) {
         return sendJson(res, 400, { error: "last_admin", message: "Impossible de retirer le dernier administrateur de cette section." });
       }
+      if (body.unlock) store.resetLoginAttempts(id);
       const updated = store.updateUser(id, fields);
       if (!updated) return sendJson(res, 404, { error: "not_found" });
       return sendJson(res, 200, publicUser(updated));

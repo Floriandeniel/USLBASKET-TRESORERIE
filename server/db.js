@@ -48,11 +48,19 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'member',
   section_id INTEGER,
+  failed_attempts INTEGER NOT NULL DEFAULT 0,
+  locked_until TEXT,
   created_at TEXT NOT NULL
 );
 `);
 if (!usersTableIsNew && !columnExists("users", "section_id")) {
   db.exec("ALTER TABLE users ADD COLUMN section_id INTEGER");
+}
+if (!usersTableIsNew && !columnExists("users", "failed_attempts")) {
+  db.exec("ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0");
+}
+if (!usersTableIsNew && !columnExists("users", "locked_until")) {
+  db.exec("ALTER TABLE users ADD COLUMN locked_until TEXT");
 }
 
 // L'ancien schéma "config" (id INTEGER PRIMARY KEY CHECK (id=1)) n'a pas de colonne
@@ -326,10 +334,10 @@ function getUserById(id) {
 function listUsers(sectionId) {
   // sectionId === null -> super_admin : liste globale (toutes sections)
   if (sectionId === null || sectionId === undefined) {
-    return db.prepare(`SELECT u.id, u.username, u.display_name, u.role, u.section_id, u.created_at, s.name AS section_name
+    return db.prepare(`SELECT u.id, u.username, u.display_name, u.role, u.section_id, u.failed_attempts, u.locked_until, u.created_at, s.name AS section_name
       FROM users u LEFT JOIN sections s ON s.id = u.section_id ORDER BY u.role='super_admin' DESC, s.name ASC, u.id ASC`).all();
   }
-  return db.prepare("SELECT id, username, display_name, role, section_id, created_at FROM users WHERE section_id = ? ORDER BY id ASC").all(sectionId);
+  return db.prepare("SELECT id, username, display_name, role, section_id, failed_attempts, locked_until, created_at FROM users WHERE section_id = ? ORDER BY id ASC").all(sectionId);
 }
 function createUser({ username, passwordHash, displayName, role, sectionId }) {
   const now = new Date().toISOString();
@@ -358,11 +366,51 @@ function countSectionAdmins(sectionId) {
   return db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND section_id = ?").get(sectionId).c;
 }
 
+/* ============================================================
+   PROTECTION CONTRE LES TENTATIVES DE CONNEXION RÉPÉTÉES
+   3 échecs consécutifs => compte bloqué 24h (même avec le bon mot
+   de passe entre-temps), jusqu'à expiration du blocage ou
+   déblocage manuel par un administrateur.
+   ============================================================ */
+const LOGIN_LOCK_THRESHOLD = 3;
+const LOGIN_LOCK_DURATION_MS = 24 * 60 * 60 * 1000;
+
+function isUserLocked(user) {
+  return !!(user && user.locked_until && new Date(user.locked_until).getTime() > Date.now());
+}
+function recordFailedLogin(id) {
+  const existing = getUserById(id);
+  if (!existing) return null;
+  const attempts = (existing.failed_attempts || 0) + 1;
+  let lockedUntil = existing.locked_until;
+  if (attempts >= LOGIN_LOCK_THRESHOLD) {
+    lockedUntil = new Date(Date.now() + LOGIN_LOCK_DURATION_MS).toISOString();
+  }
+  db.prepare("UPDATE users SET failed_attempts = ?, locked_until = ? WHERE id = ?").run(attempts, lockedUntil, id);
+  return getUserById(id);
+}
+function resetLoginAttempts(id) {
+  db.prepare("UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = ?").run(id);
+}
+
+/* ============================================================
+   SAUVEGARDE COMPLÈTE (administrateur général)
+   ============================================================ */
+function fullBackup() {
+  return listSections().map((s) => ({
+    section: s,
+    config: getConfig(s.id),
+    transactions: listTransactions(s.id)
+  }));
+}
+
 module.exports = {
   db,
   listSections, getSectionById, createSection, renameSection, deleteSection, sectionHasData,
   getConfig, setConfig,
   listTransactions, createTransaction, updateTransaction, deleteTransaction,
   countUsers, getUserByUsername, getUserById, listUsers, createUser, updateUser, deleteUser,
-  countSuperAdmins, countSectionAdmins
+  countSuperAdmins, countSectionAdmins,
+  LOGIN_LOCK_THRESHOLD, isUserLocked, recordFailedLogin, resetLoginAttempts,
+  fullBackup
 };

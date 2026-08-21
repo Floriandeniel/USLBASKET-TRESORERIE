@@ -97,7 +97,8 @@ function api(path,opts){
     return res.text().then(function(text){
       var data=null;
       if(text){ try{ data=JSON.parse(text); }catch(e){} }
-      if(res.status===401){
+      var isAuthEndpoint=(path==="/api/login"||path==="/api/setup");
+      if(res.status===401&&!isAuthEndpoint){
         currentUser=null; state=null;
         authView={mode:"login",error:""};
         renderAuthScreen();
@@ -295,6 +296,7 @@ function render(){
         "<div class=\"sidebar-foot\">"+
           "<div class=\"whoami\">👤 <b>"+escHtml(currentUser.displayName)+"</b> <span class=\"roleflag"+(isAdmin?"":" member")+"\">"+roleLabel+"</span></div>"+
           (hasSection?"<button class=\"btn btn-ghost btn-sm\" data-action=\"open-settings\">⚙︎ Paramètres de la section</button>":"")+
+          (hasSection&&isAdmin?"<button class=\"btn btn-ghost btn-sm\" data-action=\"export-section-backup\">💾 Sauvegarde de la section</button>":"")+
           "<button class=\"btn btn-ghost btn-sm\" data-action=\"logout\">↩ Se déconnecter</button>"+
         "</div>"+
       "</nav>"+
@@ -373,7 +375,8 @@ function renderSections(el){
       "<button class=\"btn btn-ghost btn-sm btn-danger\" data-action=\"delete-section\" data-id=\""+s.id+"\">Supprimer</button>"+
       "</td></tr>";
   }).join("");
-  el.innerHTML="<div class=\"card\"><div class=\"card-head\"><div><h2>Sections de l'association</h2><p>Chaque section a ses propres comptes, mouvements et membres, invisibles pour les autres sections. Vous seul, en tant qu'administrateur général, voyez tout.</p></div></div>"+
+  el.innerHTML="<div class=\"card\"><div class=\"card-head\"><div><h2>Sections de l'association</h2><p>Chaque section a ses propres comptes, mouvements et membres, invisibles pour les autres sections. Vous seul, en tant qu'administrateur général, voyez tout.</p></div>"+
+    "<button class=\"btn btn-ghost btn-sm\" data-action=\"export-full-backup\">💾 Sauvegarde complète (toutes sections)</button></div>"+
     "<div class=\"card-body pad0\"><div class=\"tablewrap\"><table><thead><tr><th>Nom</th><th class=\"num\">Mouvements</th><th></th></tr></thead><tbody>"+(rows||"<tr><td colspan=\"3\" class=\"empty\">Aucune section.</td></tr>")+"</tbody></table></div></div>"+
     "<div class=\"card-body\" style=\"border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap\">"+
       "<input type=\"text\" id=\"new-section-name\" placeholder=\"Nom de la nouvelle section (ex. Section Football)\" style=\"max-width:320px\">"+
@@ -724,6 +727,9 @@ function renderUsers(el){
     var roleLabel=u.role==="super_admin"?"Admin général":(u.role==="admin"?"Admin section":"Membre");
     var roleClass=u.role==="member"?" member":"";
     var actions="";
+    if(u.locked){
+      actions+="<button class=\"btn btn-ghost btn-sm\" data-action=\"unlock-user\" data-id=\""+u.id+"\">Débloquer</button> ";
+    }
     if(u.role!=="super_admin"){
       actions+="<button class=\"btn btn-ghost btn-sm\" data-action=\"toggle-role\" data-id=\""+u.id+"\" data-role=\""+(u.role==="admin"?"member":"admin")+"\">"+(u.role==="admin"?"Rétrograder":"Promouvoir admin")+"</button> ";
     }
@@ -731,7 +737,7 @@ function renderUsers(el){
     if(!(u.role==="super_admin"&&isSelf)){
       actions+="<button class=\"btn btn-ghost btn-sm btn-danger\" data-action=\"delete-user\" data-id=\""+u.id+"\">Supprimer</button>";
     }
-    return "<tr><td>"+escHtml(u.displayName)+(isSelf?" <span style=\"color:var(--ink-faint);font-size:11.5px\">(vous)</span>":"")+"</td>"+
+    return "<tr><td>"+escHtml(u.displayName)+(isSelf?" <span style=\"color:var(--ink-faint);font-size:11.5px\">(vous)</span>":"")+(u.locked?" <span class=\"pill pill-warn\" title=\"Bloqué après plusieurs tentatives échouées\">🔒 Bloqué</span>":"")+"</td>"+
       "<td>"+escHtml(u.username)+"</td>"+
       (isSuper?("<td>"+escHtml(u.sectionName||"—")+"</td>"):"")+
       "<td><span class=\"roleflag"+roleClass+"\">"+roleLabel+"</span></td>"+
@@ -1045,11 +1051,31 @@ document.addEventListener("click",function(e){
       downloadCsv("mouvements_"+slugify(state.meta.club)+".csv",txToCsvRows(filteredTx()));
       break;
     }
+    case "export-section-backup": {
+      var backupPayload={exportedAt:new Date().toISOString(),section:{id:ui.activeSection,name:state.meta.club},config:currentConfig(),transactions:state.transactions};
+      downloadJson("sauvegarde_"+slugify(state.meta.club)+"_"+todayISO()+".json",backupPayload);
+      toast("Sauvegarde de la section téléchargée.");
+      break;
+    }
+    case "export-full-backup": {
+      api("/api/backup").then(function(data){
+        downloadJson("sauvegarde_complete_"+todayISO()+".json",data);
+        toast("Sauvegarde complète téléchargée ("+(data.sections?data.sections.length:0)+" section(s)).");
+      }).catch(function(e){ toast("Erreur : "+e.message,true); });
+      break;
+    }
     case "toggle-role": {
       var newRole=btn.getAttribute("data-role");
       api("/api/users/"+id,{method:"PUT",body:JSON.stringify({role:newRole})}).then(function(u){
         ui.users=ui.users.map(function(x){return String(x.id)===String(id)?u:x;});
         toast("Rôle mis à jour."); render();
+      }).catch(function(e){ toast("Erreur : "+e.message,true); });
+      break;
+    }
+    case "unlock-user": {
+      api("/api/users/"+id,{method:"PUT",body:JSON.stringify({unlock:true})}).then(function(u){
+        ui.users=ui.users.map(function(x){return String(x.id)===String(id)?u:x;});
+        toast("Compte débloqué."); render();
       }).catch(function(e){ toast("Erreur : "+e.message,true); });
       break;
     }
@@ -1188,6 +1214,14 @@ function txToCsvRows(list){
 }
 function downloadCsv(filename,content){
   var blob=new Blob(["\uFEFF"+content],{type:"text/csv;charset=utf-8;"});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement("a");
+  a.href=url; a.download=filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); },0);
+}
+function downloadJson(filename,obj){
+  var blob=new Blob([JSON.stringify(obj,null,2)],{type:"application/json;charset=utf-8;"});
   var url=URL.createObjectURL(blob);
   var a=document.createElement("a");
   a.href=url; a.download=filename;
