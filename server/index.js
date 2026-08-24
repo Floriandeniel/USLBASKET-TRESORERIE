@@ -64,7 +64,8 @@ function serveStatic(req, res, pathname) {
       return;
     }
     const ext = path.extname(filePath);
-    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream", ...NO_CACHE_HEADERS });
+    const contentType = rel === "/manifest.json" ? "application/manifest+json; charset=utf-8" : (MIME[ext] || "application/octet-stream");
+    res.writeHead(200, { "Content-Type": contentType, ...NO_CACHE_HEADERS });
     res.end(data);
   });
 }
