@@ -205,6 +205,9 @@ textarea{resize:vertical;min-height:56px;}
 .bartrack{background:var(--neutral-soft);border-radius:5px;height:10px;overflow:hidden;}
 .barfill{height:100%;border-radius:5px;}
 .barval{font-family:var(--font-mono);font-size:12px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+.supplier-block{padding:10px 0;border-bottom:1px solid var(--border);}
+.supplier-block:last-child{border-bottom:none;}
+.supplier-name{font-size:13px;font-weight:600;margin-bottom:6px;}
 .taglist{display:flex;flex-wrap:wrap;gap:6px;}
 .tag{display:flex;align-items:center;gap:6px;background:var(--surface-alt);border-radius:99px;padding:5px 6px 5px 12px;font-size:12.5px;}
 .tag button{border:none;background:transparent;cursor:pointer;color:var(--ink-faint);width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;}

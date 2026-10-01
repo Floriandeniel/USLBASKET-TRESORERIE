@@ -236,10 +236,10 @@ var DATA_NAV=[
   {group:"Saisie",items:[{id:"mouvements",label:"Mouvements",ic:"☷"}]},
   {group:"Structure",items:[{id:"comptes",label:"Comptes",ic:"▤"},{id:"categories",label:"Catégories",ic:"≡"},{id:"referentiels",label:"Référentiels",ic:"⚙"}]},
   {group:"Budget",items:[{id:"budget",label:"Budget prévisionnel",ic:"▣"},{id:"resultat",label:"Réalisé vs prévisionnel",ic:"⚖"}]},
-  {group:"Analyses",items:[{id:"mensuelle",label:"Analyse mensuelle",ic:"▦"},{id:"depenses-recettes",label:"Dépenses / recettes",ic:"▥"}]},
+  {group:"Analyses",items:[{id:"mensuelle",label:"Analyse mensuelle",ic:"▦"},{id:"depenses-recettes",label:"Dépenses / recettes",ic:"▥"},{id:"fournisseurs",label:"Fournisseurs & salariés",ic:"🧾"}]},
   {group:"Contrôle",items:[{id:"bilan",label:"Bilan / trésorerie",ic:"◉"},{id:"anomalies",label:"Anomalies",ic:"⚠"}]}
 ];
-var TAB_TITLES={dashboard:"Tableau de bord",mouvements:"Mouvements",comptes:"Comptes",categories:"Catégories",referentiels:"Référentiels",budget:"Budget prévisionnel",resultat:"Réalisé vs prévisionnel",mensuelle:"Analyse mensuelle",'depenses-recettes':"Analyse dépenses / recettes",bilan:"Bilan et trésorerie",anomalies:"Détection d'anomalies",users:"Utilisateurs",'vue-globale':"Vue globale de l'association",sections:"Sections"};
+var TAB_TITLES={dashboard:"Tableau de bord",mouvements:"Mouvements",comptes:"Comptes",categories:"Catégories",referentiels:"Référentiels",budget:"Budget prévisionnel",resultat:"Réalisé vs prévisionnel",mensuelle:"Analyse mensuelle",'depenses-recettes':"Analyse dépenses / recettes",fournisseurs:"Fournisseurs & salariés",bilan:"Bilan et trésorerie",anomalies:"Détection d'anomalies",users:"Utilisateurs",'vue-globale':"Vue globale de l'association",sections:"Sections"};
 
 function buildNav(isSuper,isAdmin,hasSection){
   var groups=[];
@@ -313,6 +313,7 @@ function render(){
     dashboard:renderDashboard, mouvements:renderMouvements, comptes:renderComptes,
     categories:renderCategories, referentiels:renderReferentiels, budget:renderBudget,
     resultat:renderResultat, mensuelle:renderMensuelle, 'depenses-recettes':renderDepensesRecettes,
+    fournisseurs:renderFournisseurs,
     bilan:renderBilan, anomalies:renderAnomalies, users:renderUsers,
     'vue-globale':renderVueGlobale, sections:renderSections
   };
@@ -658,6 +659,89 @@ function renderDepensesRecettes(el){
     return "<div class=\"card\"><div class=\"card-head\"><h2>"+label+"</h2><p>Total "+fmtMoney(sum)+"</p></div><div class=\"card-body\">"+rows+"</div></div>";
   }
   el.innerHTML=block("sortie","Répartition des dépenses",totS,sumS,"var(--negative)")+block("entree","Répartition des recettes",totE,sumE,"var(--positive)");
+}
+
+/* ================= FOURNISSEURS / SALARIES ================= */
+function supplierTotals(){
+  var out={};
+  (state.transactions||[]).forEach(function(t){
+    var name=(t.fournisseur||"").trim();
+    if(!name) return;
+    if(t.type!=="sortie" && t.type!=="entree") return;
+    if(!out[name]) out[name]={depense:0,recette:0,n:0};
+    out[name][t.type==="sortie"?"depense":"recette"]+=t.montant;
+    out[name].n++;
+  });
+  return out;
+}
+function employeeTotals(){
+  var out={};
+  (state.transactions||[]).forEach(function(t){
+    var name=(t.salarie||"").trim();
+    if(!name) return;
+    if(t.type!=="sortie") return;
+    if(!out[name]) out[name]={total:0,n:0};
+    out[name].total+=t.montant;
+    out[name].n++;
+  });
+  return out;
+}
+function renderFournisseurs(el){
+  var sup=supplierTotals();
+  var names=Object.keys(sup);
+  var totalDep=0,totalRec=0;
+  names.forEach(function(n){ totalDep+=sup[n].depense; totalRec+=sup[n].recette; });
+  var maxVal=0;
+  names.forEach(function(n){ maxVal=Math.max(maxVal,sup[n].depense,sup[n].recette); });
+  var sorted=names.slice().sort(function(a,b){ return (sup[b].depense+sup[b].recette)-(sup[a].depense+sup[a].recette); });
+
+  var emp=employeeTotals();
+  var empNames=Object.keys(emp);
+  var totalMasseSalariale=0;
+  empNames.forEach(function(n){ totalMasseSalariale+=emp[n].total; });
+  var maxEmp=0;
+  empNames.forEach(function(n){ maxEmp=Math.max(maxEmp,emp[n].total); });
+  var sortedEmp=empNames.slice().sort(function(a,b){ return emp[b].total-emp[a].total; });
+
+  var tiles="<div class=\"grid-tiles\">"+
+    "<div class=\"tile\"><div class=\"tile-label\">Fournisseurs / prestataires actifs</div><div class=\"tile-val\">"+names.length+"</div></div>"+
+    "<div class=\"tile\"><div class=\"tile-label\">Total dépenses fournisseurs</div><div class=\"tile-val neg\">"+fmtMoney(totalDep)+"</div></div>"+
+    "<div class=\"tile\"><div class=\"tile-label\">Total recettes (sponsors, etc.)</div><div class=\"tile-val pos\">"+fmtMoney(totalRec)+"</div></div>"+
+    "<div class=\"tile\"><div class=\"tile-label\">Masse salariale totale</div><div class=\"tile-val neg\">"+fmtMoney(totalMasseSalariale)+"</div></div>"+
+    "</div>";
+
+  var supplierCard;
+  if(!sorted.length){
+    supplierCard="<div class=\"card\"><div class=\"card-head\"><h2>Dépenses / recettes par fournisseur ou prestataire</h2></div><div class=\"card-body\"><div class=\"empty\">Aucun mouvement n'est encore rattaché à un fournisseur ou prestataire. Renseignez le champ « Fournisseur / prestataire » en saisissant un mouvement.</div></div></div>";
+  } else {
+    var supRows=sorted.map(function(n){
+      var v=sup[n];
+      var pctDep=maxVal>0?(v.depense/maxVal*100):0;
+      var pctRec=maxVal>0?(v.recette/maxVal*100):0;
+      var net=v.recette-v.depense;
+      return "<div class=\"supplier-block\">"+
+        "<div class=\"supplier-name\">"+escHtml(n)+" <span style=\"color:var(--ink-faint);font-weight:400\">("+v.n+" mouvement(s)"+(net!==0?(" · solde "+(net<0?"<span class=\"neg\">":"<span class=\"pos\">")+fmtMoney(net)+"</span>"):"")+")</span></div>"+
+        (v.depense>0?"<div class=\"barrow\"><div class=\"lbl\">Dépenses</div><div class=\"bartrack\"><div class=\"barfill\" style=\"width:"+pctDep.toFixed(1)+"%;background:var(--negative)\"></div></div><div class=\"barval\">"+fmtMoney(v.depense)+"</div></div>":"")+
+        (v.recette>0?"<div class=\"barrow\"><div class=\"lbl\">Recettes</div><div class=\"bartrack\"><div class=\"barfill\" style=\"width:"+pctRec.toFixed(1)+"%;background:var(--positive)\"></div></div><div class=\"barval\">"+fmtMoney(v.recette)+"</div></div>":"")+
+        "</div>";
+    }).join("");
+    supplierCard="<div class=\"card\"><div class=\"card-head\"><h2>Dépenses / recettes par fournisseur ou prestataire</h2><p>Comparez ce que coûte ou rapporte chaque fournisseur, prestataire ou sponsor, toutes saisons confondues.</p></div><div class=\"card-body\">"+supRows+"</div></div>";
+  }
+
+  var empCard;
+  if(!sortedEmp.length){
+    empCard="<div class=\"card\"><div class=\"card-head\"><h2>Coût par salarié</h2></div><div class=\"card-body\"><div class=\"empty\">Aucune dépense n'est encore rattachée à un salarié. Renseignez le champ « Salarié » en saisissant une sortie (ex. un salaire).</div></div></div>";
+  } else {
+    var empRows=sortedEmp.map(function(n){
+      var v=emp[n];
+      var pct=maxEmp>0?(v.total/maxEmp*100):0;
+      var pctShare=totalMasseSalariale>0?(v.total/totalMasseSalariale*100):0;
+      return "<div class=\"barrow\"><div class=\"lbl\">"+escHtml(n)+"</div><div class=\"bartrack\"><div class=\"barfill\" style=\"width:"+pct.toFixed(1)+"%;background:var(--accent)\"></div></div><div class=\"barval\">"+fmtMoney(v.total)+" <span style=\"color:var(--ink-faint)\">("+pctShare.toFixed(0)+"% · "+v.n+" versement(s))</span></div></div>";
+    }).join("");
+    empCard="<div class=\"card\"><div class=\"card-head\"><h2>Coût par salarié</h2><p>Isole ce que coûte chaque salarié sur l'ensemble des mouvements de sortie, toutes saisons confondues. Total "+fmtMoney(totalMasseSalariale)+".</p></div><div class=\"card-body\">"+empRows+"</div></div>";
+  }
+
+  el.innerHTML=tiles+supplierCard+empCard;
 }
 
 /* ================= BILAN / TRESORERIE ================= */
