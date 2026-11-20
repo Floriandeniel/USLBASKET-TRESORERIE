@@ -11,8 +11,9 @@ var authView={mode:"loading",error:""};
 var globalSections=null; /* liste des sections (null = pas encore chargée), utilisée par l'administrateur général */
 var ui={tab:"dashboard",
   activeSection:null,
-  filters:{q:"",type:"",compte:"",cat:"",validOnly:"",from:"",to:""},
+  filters:{q:"",type:"",compte:"",cat:"",sub:"",validOnly:"",from:"",to:""},
   sort:{key:"dateOp",dir:"desc"},
+  budgetSubOpen:{},resultatSubOpen:{},
   modal:null,editing:null,confirm:null,users:null};
 
 function escHtml(s){
@@ -65,6 +66,16 @@ function categoryTotals(dir){
   (state.transactions||[]).forEach(function(t){
     if(t.type!==dir) return;
     var k=t.catId; out[k]=(out[k]||0)+t.montant;
+  });
+  return out;
+}
+function subCategoryTotals(dir){
+  var out={};
+  (state.transactions||[]).forEach(function(t){
+    if(t.type!==dir) return;
+    if(!t.subId) return;
+    if(!out[t.catId]) out[t.catId]={};
+    out[t.catId][t.subId]=(out[t.catId][t.subId]||0)+t.montant;
   });
   return out;
 }
@@ -124,7 +135,7 @@ function toast(msg,isErr){
   setTimeout(function(){ el.remove(); },3800);
 }
 function currentConfig(){
-  return {meta:state.meta,accounts:state.accounts,categories:state.categories,budget:state.budget,refs:state.refs,anomalySettings:state.anomalySettings};
+  return {meta:state.meta,accounts:state.accounts,categories:state.categories,budget:state.budget,budgetSub:state.budgetSub,refs:state.refs,anomalySettings:state.anomalySettings};
 }
 function saveConfig(successMsg){
   return api("/api/config"+sectionQS(),{method:"PUT",body:JSON.stringify(currentConfig())}).then(function(){
@@ -166,6 +177,7 @@ function loadAppData(){
   Promise.all([api("/api/config"+sectionQS()),api("/api/transactions"+sectionQS())]).then(function(results){
     state=results[0];
     state.transactions=results[1];
+    state.budgetSub=state.budgetSub||{sortie:{},entree:{}};
     render();
   }).catch(function(e){
     toast("Erreur de chargement : "+e.message,true);
@@ -437,6 +449,7 @@ function filteredTx(){
     if(f.type && t.type!==f.type) return false;
     if(f.compte && String(t.accountId)!==String(f.compte)) return false;
     if(f.cat && String(t.catId)!==String(f.cat)) return false;
+    if(f.sub && String(t.subId)!==String(f.sub)) return false;
     if(f.validOnly==="1" && !t.valide) return false;
     if(f.validOnly==="0" && t.valide) return false;
     if(f.from && (t.dateOp||"") < f.from) return false;
@@ -494,6 +507,13 @@ function renderMouvements(el){
   var accOpts=(state.accounts||[]).map(function(a){return "<option value=\""+a.id+"\""+(ui.filters.compte==String(a.id)?" selected":"")+">"+escHtml(a.name)+"</option>";}).join("");
   var allCats=catList("sortie").concat(catList("entree"));
   var catOpts=allCats.map(function(c){return "<option value=\""+c.id+"\""+(ui.filters.cat==String(c.id)?" selected":"")+">"+escHtml(c.name)+"</option>";}).join("");
+  var matchingSubs=[];
+  if(ui.filters.cat){
+    allCats.filter(function(c){return String(c.id)===String(ui.filters.cat);}).forEach(function(c){
+      (c.subs||[]).forEach(function(s){ matchingSubs.push(s); });
+    });
+  }
+  var subOpts=matchingSubs.map(function(s){return "<option value=\""+s.id+"\""+(ui.filters.sub==String(s.id)?" selected":"")+">"+escHtml(s.name)+"</option>";}).join("");
 
   el.innerHTML=
     "<div class=\"card\">"+
@@ -504,6 +524,7 @@ function renderMouvements(el){
       "<select id=\"f-type\"><option value=\"\">Tous types</option><option value=\"entree\""+(ui.filters.type==="entree"?" selected":"")+">Entrée</option><option value=\"sortie\""+(ui.filters.type==="sortie"?" selected":"")+">Sortie</option><option value=\"transfert\""+(ui.filters.type==="transfert"?" selected":"")+">Transfert</option></select>"+
       "<select id=\"f-compte\"><option value=\"\">Tous comptes</option>"+accOpts+"</select>"+
       "<select id=\"f-cat\"><option value=\"\">Toutes catégories</option>"+catOpts+"</select>"+
+      "<select id=\"f-sub\""+(matchingSubs.length?"":" disabled")+"><option value=\"\">"+(matchingSubs.length?"Toutes sous-catégories":"Choisissez une catégorie d'abord")+"</option>"+subOpts+"</select>"+
       "<select id=\"f-valid\"><option value=\"\">Validé : tous</option><option value=\"1\""+(ui.filters.validOnly==="1"?" selected":"")+">Validés</option><option value=\"0\""+(ui.filters.validOnly==="0"?" selected":"")+">Non validés</option></select>"+
       "<input type=\"date\" id=\"f-from\" value=\""+escHtml(ui.filters.from)+"\" title=\"Du\">"+
       "<input type=\"date\" id=\"f-to\" value=\""+escHtml(ui.filters.to)+"\" title=\"Au\">"+
@@ -571,13 +592,25 @@ function renderBudget(el){
     var cats=catList(dir);
     var rows=cats.map(function(c){
       var v=(state.budget[dir]||{})[c.id]||0;
-      return "<tr><td>"+escHtml(c.name)+"</td><td class=\"num\"><input type=\"number\" step=\"0.01\" min=\"0\" class=\"tabular\" style=\"text-align:right;max-width:130px\" data-budget-dir=\""+dir+"\" data-budget-cat=\""+c.id+"\" value=\""+v+"\"></td></tr>";
+      var key=dir+":"+c.id;
+      var open=!!ui.budgetSubOpen[key];
+      var hasSubs=(c.subs||[]).length>0;
+      var toggle=hasSubs?("<button type=\"button\" class=\"btn-toggle\" data-action=\"toggle-budget-sub\" data-dir=\""+dir+"\" data-cat=\""+c.id+"\" title=\"Détailler par sous-catégorie\">"+(open?"▾":"▸")+"</button> "):"";
+      var catRow="<tr><td>"+toggle+escHtml(c.name)+"</td><td class=\"num\"><input type=\"number\" step=\"0.01\" min=\"0\" class=\"tabular\" style=\"text-align:right;max-width:130px\" data-budget-dir=\""+dir+"\" data-budget-cat=\""+c.id+"\" value=\""+v+"\"></td></tr>";
+      var subRows="";
+      if(open && hasSubs){
+        subRows=c.subs.map(function(s){
+          var sv=((state.budgetSub[dir]||{})[s.id])||0;
+          return "<tr class=\"subrow\"><td style=\"padding-left:34px;color:var(--ink-soft);font-size:12.5px\">"+escHtml(s.name)+"</td><td class=\"num\"><input type=\"number\" step=\"0.01\" min=\"0\" class=\"tabular\" style=\"text-align:right;max-width:130px\" data-budgetsub-dir=\""+dir+"\" data-budgetsub-sub=\""+s.id+"\" value=\""+sv+"\"></td></tr>";
+        }).join("");
+      }
+      return catRow+subRows;
     }).join("");
     var total=cats.reduce(function(s,c){return s+((state.budget[dir]||{})[c.id]||0);},0);
     return "<div class=\"card\"><div class=\"card-head\"><h2>"+label+"</h2></div><div class=\"card-body pad0\"><div class=\"tablewrap\"><table><thead><tr><th>Catégorie</th><th class=\"num\">Budget saison</th></tr></thead><tbody>"+rows+"</tbody>"+
       "<tfoot><tr><td>Total</td><td class=\"num\">"+fmtMoney(total)+"</td></tr></tfoot></table></div></div></div>";
   }
-  el.innerHTML="<p style=\"color:var(--ink-faint);margin-top:0\">Saisissez le budget prévisionnel par catégorie pour la saison "+escHtml(state.meta.saison)+". Ces montants servent de référence dans l'onglet « Réalisé vs prévisionnel ».</p>"+
+  el.innerHTML="<p style=\"color:var(--ink-faint);margin-top:0\">Saisissez le budget prévisionnel par catégorie pour la saison "+escHtml(state.meta.saison)+". Ces montants servent de référence dans l'onglet « Réalisé vs prévisionnel ». Dépliez une catégorie (▸) pour, en plus, budgéter ses sous-catégories une à une.</p>"+
     "<div style=\"display:flex;justify-content:flex-end;margin-bottom:10px\"><button class=\"btn btn-primary btn-sm\" data-action=\"save-budget\">Enregistrer le budget</button></div>"+
     block("sortie","Dépenses prévues")+block("entree","Recettes prévues");
 }
@@ -585,18 +618,36 @@ function renderBudget(el){
 /* ================= RESULTAT (realise vs previsionnel) ================= */
 function renderResultat(el){
   var totS=categoryTotals("sortie"), totE=categoryTotals("entree");
+  var subS=subCategoryTotals("sortie"), subE=subCategoryTotals("entree");
+  function subRow(dir,s,subTot,goodWhenRealizedLower){
+    var real=(subTot&&subTot[s.id])||0;
+    var bud=((state.budgetSub[dir]||{})[s.id])||0;
+    var ratio=bud>0?(real/bud*100):(real>0?100:0);
+    var ok = goodWhenRealizedLower? (real<=bud) : (real>=bud);
+    var okKnown = bud>0 || real>0;
+    return "<tr class=\"subrow\"><td style=\"padding-left:34px;color:var(--ink-soft);font-size:12.5px\">"+escHtml(s.name)+"</td><td class=\"num\">"+fmtMoney(real)+"</td><td class=\"num\">"+fmtMoney(bud)+"</td>"+
+      "<td class=\"num\">"+(bud>0?ratio.toFixed(0)+"%":"—")+"</td>"+
+      "<td style=\"text-align:center\">"+(okKnown?("<span class=\"pill "+(ok?"pill-ok":"pill-ko")+"\">"+(ok?"OK":"À surveiller")+"</span>"):"—")+"</td></tr>";
+  }
   function block(dir,label,goodWhenRealizedLower){
     var cats=catList(dir);
     var tot=dir==="sortie"?totS:totE;
+    var subTotAll=dir==="sortie"?subS:subE;
     var rows=cats.map(function(c){
       var real=tot[c.id]||0;
       var bud=(state.budget[dir]||{})[c.id]||0;
       var ratio=bud>0?(real/bud*100):(real>0?100:0);
       var ok = goodWhenRealizedLower? (real<=bud) : (real>=bud);
       var okKnown = bud>0 || real>0;
-      return "<tr><td>"+escHtml(c.name)+"</td><td class=\"num\">"+fmtMoney(real)+"</td><td class=\"num\">"+fmtMoney(bud)+"</td>"+
+      var key=dir+":"+c.id;
+      var open=!!ui.resultatSubOpen[key];
+      var hasSubs=(c.subs||[]).length>0;
+      var toggle=hasSubs?("<button type=\"button\" class=\"btn-toggle\" data-action=\"toggle-resultat-sub\" data-dir=\""+dir+"\" data-cat=\""+c.id+"\" title=\"Détailler par sous-catégorie\">"+(open?"▾":"▸")+"</button> "):"";
+      var catRow="<tr><td>"+toggle+escHtml(c.name)+"</td><td class=\"num\">"+fmtMoney(real)+"</td><td class=\"num\">"+fmtMoney(bud)+"</td>"+
         "<td class=\"num\">"+(bud>0?ratio.toFixed(0)+"%":"—")+"</td>"+
         "<td style=\"text-align:center\">"+(okKnown?("<span class=\"pill "+(ok?"pill-ok":"pill-ko")+"\">"+(ok?"OK":"À surveiller")+"</span>"):"—")+"</td></tr>";
+      var subRows=(open&&hasSubs)?c.subs.map(function(s){return subRow(dir,s,subTotAll[c.id],goodWhenRealizedLower);}).join(""):"";
+      return catRow+subRows;
     }).join("");
     var realTot=cats.reduce(function(s,c){return s+(tot[c.id]||0);},0);
     var budTot=cats.reduce(function(s,c){return s+((state.budget[dir]||{})[c.id]||0);},0);
@@ -608,6 +659,7 @@ function renderResultat(el){
     "<div class=\"tile\"><div class=\"tile-label\">Résultat réalisé</div><div class=\"tile-val "+((produits-charges)<0?"neg":"pos")+"\">"+fmtMoney(produits-charges)+"</div></div>"+
     "<div class=\"tile\"><div class=\"tile-label\">Résultat prévisionnel</div><div class=\"tile-val\">"+fmtMoney(sumBudget("entree")-sumBudget("sortie"))+"</div></div>"+
     "</div>"+
+    "<p style=\"color:var(--ink-faint);margin-top:0\">Dépliez une catégorie (▸) pour voir le réalisé et le budget de chacune de ses sous-catégories.</p>"+
     block("sortie","Dépenses — réalisé vs budget (OK si réalisé ≤ budget)",true)+
     block("entree","Recettes — réalisé vs budget (OK si réalisé ≥ budget)",false);
 }
@@ -1007,7 +1059,7 @@ document.addEventListener("click",function(e){
     case "open-settings": openModal("settings",null); break;
     case "save-settings": submitSettings(); break;
     case "confirm-yes": if(ui.confirm){ var fn=ui.confirm; ui.confirm=null; closeModal(); fn(); } break;
-    case "reset-filters": ui.filters={q:"",type:"",compte:"",cat:"",validOnly:"",from:"",to:""}; render(); break;
+    case "reset-filters": ui.filters={q:"",type:"",compte:"",cat:"",sub:"",validOnly:"",from:"",to:""}; render(); break;
     case "logout": api("/api/logout",{method:"POST"}).then(function(){
         currentUser=null; state=null; ui.tab="dashboard"; authView={mode:"login",error:""};
         renderAuthScreen();
@@ -1067,8 +1119,26 @@ document.addEventListener("click",function(e){
         state.budget[dir]=state.budget[dir]||{};
         state.budget[dir][cat]=Number(inp.value)||0;
       });
+      var subInputs=document.querySelectorAll("[data-budgetsub-dir]");
+      subInputs.forEach(function(inp){
+        var dir=inp.getAttribute("data-budgetsub-dir"), sub=inp.getAttribute("data-budgetsub-sub");
+        state.budgetSub[dir]=state.budgetSub[dir]||{};
+        state.budgetSub[dir][sub]=Number(inp.value)||0;
+      });
       saveConfig("Budget enregistré.");
       break;
+    }
+    case "toggle-budget-sub": {
+      var dir=btn.getAttribute("data-dir"), cat=btn.getAttribute("data-cat");
+      var key=dir+":"+cat;
+      ui.budgetSubOpen[key]=!ui.budgetSubOpen[key];
+      render(); break;
+    }
+    case "toggle-resultat-sub": {
+      var dir=btn.getAttribute("data-dir"), cat=btn.getAttribute("data-cat");
+      var key=dir+":"+cat;
+      ui.resultatSubOpen[key]=!ui.resultatSubOpen[key];
+      render(); break;
     }
     case "save-anomaly-settings": {
       var h=Number(document.getElementById("an-haut").value)||0;
@@ -1182,9 +1252,11 @@ document.addEventListener("click",function(e){
 });
 document.addEventListener("change",function(e){
   var id=e.target.id;
-  if(["f-type","f-compte","f-cat","f-valid","f-from","f-to"].indexOf(id)!==-1){
-    var map={"f-type":"type","f-compte":"compte","f-cat":"cat","f-valid":"validOnly","f-from":"from","f-to":"to"};
-    ui.filters[map[id]]=e.target.value; render();
+  if(["f-type","f-compte","f-cat","f-sub","f-valid","f-from","f-to"].indexOf(id)!==-1){
+    var map={"f-type":"type","f-compte":"compte","f-cat":"cat","f-sub":"sub","f-valid":"validOnly","f-from":"from","f-to":"to"};
+    ui.filters[map[id]]=e.target.value;
+    if(id==="f-cat") ui.filters.sub="";
+    render();
   }
 });
 document.addEventListener("input",function(e){
@@ -1316,3 +1388,4 @@ function downloadJson(filename,obj){
 /* ================= INIT ================= */
 if(document.readyState==="loading"){ document.addEventListener("DOMContentLoaded",boot); } else { boot(); }
 })();
+
