@@ -47,6 +47,8 @@ module.exports = {
   accounts: ACCOUNTS_DEFAULT,
   categories: { sortie: CATS_SORTIE, entree: CATS_ENTREE },
   budget: { sortie: {}, entree: {} },
+  budgetSub: { sortie: {}, entree: {} },
   refs: { fournisseurs: [], salaries: [], evenements: [] },
   anomalySettings: { seuilHaut: 10000, seuilBas: 0 }
 };
+
